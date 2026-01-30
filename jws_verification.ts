@@ -3,7 +3,7 @@
 import jsonwebtoken = require('jsonwebtoken');
 
 import base64url from 'base64url';
-import { KeyObject, X509Certificate, createHash, verify } from 'crypto';
+import { X509Certificate, createHash } from 'crypto';
 import { KJUR, X509, ASN1HEX } from 'jsrsasign';
 import fetch, { Headers } from 'node-fetch';
 import { Environment } from './models/Environment';
@@ -14,6 +14,9 @@ import { DecodedRealtimeRequestBody, DecodedRealtimeRequestBodyValidator } from 
 import { Validator } from './models/Validator';
 import { DecodedSignedData } from './models/DecodedSignedData';
 import { AppTransaction, AppTransactionValidator } from './models/AppTransaction';
+import { X509CertificateCompat } from './crypto-compat/X509CertificateCompat';
+import { PublicKey } from '@peculiar/x509';
+import { CryptoCompat } from './compat-crypto/CryptoCompat';
 
 const MAX_SKEW = 60000
 
@@ -21,10 +24,10 @@ const MAXIMUM_CACHE_SIZE = 32 // There are unlikely to be more than a couple key
 const CACHE_TIME_LIMIT = 15 * 60 * 1_000 // 15 minutes
 
 class CacheValue {
-  public publicKey: KeyObject
+  public publicKey: PublicKey
   public cacheExpiry: number
 
-  constructor(publicKey: KeyObject, cacheExpiry: number) {
+  constructor(publicKey: PublicKey, cacheExpiry: number) {
     this.publicKey = publicKey
     this.cacheExpiry = cacheExpiry
   }
@@ -227,10 +230,7 @@ export class SignedDataVerifier {
         }
         const effectiveDate = this.enableOnlineChecks ? new Date() : signedDateExtractor(decodedJWT)
         const publicKey = await this.verifyCertificateChain(this.rootCertificates, certificateChain[0], certificateChain[1], effectiveDate);
-        const encodedKey = publicKey.export({
-          type: "spki",
-          format: "pem"
-        });
+        const encodedKey = publicKey.toString();
         jsonwebtoken.verify(jwt, encodedKey) as T
         return decodedJWT
       } catch (error) {
@@ -243,7 +243,7 @@ export class SignedDataVerifier {
       }
     }
 
-    protected async verifyCertificateChain(trustedRoots: X509Certificate[], leaf: X509Certificate, intermediate: X509Certificate, effectiveDate: Date): Promise<KeyObject> {
+    protected async verifyCertificateChain(trustedRoots: X509Certificate[], leaf: X509Certificate, intermediate: X509Certificate, effectiveDate: Date): Promise<PublicKey> {
       let cacheKey = leaf.toString() + intermediate.toString()
       if (this.enableOnlineChecks) {
         if (cacheKey in this.verifiedPublicKeyCache) {
@@ -256,7 +256,7 @@ export class SignedDataVerifier {
       let publicKey = await this.verifyCertificateChainWithoutCaching(trustedRoots, leaf, intermediate, effectiveDate)
 
       if (this.enableOnlineChecks) {
-        this.verifiedPublicKeyCache[cacheKey] = new CacheValue(leaf.publicKey, new Date().getTime() + CACHE_TIME_LIMIT)
+        this.verifiedPublicKeyCache[cacheKey] = new CacheValue(X509CertificateCompat.publicKey(leaf), new Date().getTime() + CACHE_TIME_LIMIT)
         if (Object.keys(this.verifiedPublicKeyCache).length > MAXIMUM_CACHE_SIZE) {
           for (let key in Object.keys(this.verifiedPublicKeyCache)) {
             if (this.verifiedPublicKeyCache[key].cacheExpiry < new Date().getTime()) {
@@ -268,16 +268,16 @@ export class SignedDataVerifier {
       return publicKey
     }
 
-    protected async verifyCertificateChainWithoutCaching(trustedRoots: X509Certificate[], leaf: X509Certificate, intermediate: X509Certificate, effectiveDate: Date): Promise<KeyObject> {
+    protected async verifyCertificateChainWithoutCaching(trustedRoots: X509Certificate[], leaf: X509Certificate, intermediate: X509Certificate, effectiveDate: Date): Promise<PublicKey> {
       let validity = false
       let rootCert
       for (const root of trustedRoots) {
-        if (intermediate.verify(root.publicKey) && intermediate.issuer === root.subject) {
+        if ((await X509CertificateCompat.verify(intermediate, root)) && intermediate.issuer === root.subject) {
           validity = true
           rootCert = root
         }
       }
-      validity = validity && leaf.verify(intermediate.publicKey) && leaf.issuer === intermediate.subject
+      validity = validity && (await X509CertificateCompat.verify(leaf, intermediate)) && leaf.issuer === intermediate.subject
       validity = validity && intermediate.ca
       const jsrsassignX509Leaf = new X509()
       jsrsassignX509Leaf.readCertHex(leaf.raw.toString('hex'))
@@ -295,7 +295,7 @@ export class SignedDataVerifier {
       if (this.enableOnlineChecks) {
         await Promise.all([this.checkOCSPStatus(leaf, intermediate), this.checkOCSPStatus(intermediate, rootCert)])
       }
-      return leaf.publicKey
+      return X509CertificateCompat.publicKey(leaf)
     }
     protected async checkOCSPStatus(cert: X509Certificate, issuer: X509Certificate): Promise<void> {
       const authorityRex = /^OCSP - URI:(.*)$/m
@@ -359,9 +359,9 @@ export class SignedDataVerifier {
         throw new VerificationException(VerificationStatus.FAILURE)
       }
       // Verify Signing Cert is issued by issuer
-      if (signingCert.publicKey === issuer.publicKey && signingCert.subject === issuer.subject) {
+      if (X509CertificateCompat.publicKey(signingCert) === X509CertificateCompat.publicKey(issuer) && signingCert.subject === issuer.subject) {
         // This is directly signed by the issuer
-      } else if (signingCert.verify(issuer.publicKey)) {
+      } else if (await X509CertificateCompat.verify(signingCert, issuer)) {
         // This is issued by the issuer, let's check the dates and purpose
         const signingCertAssign = new X509()
         signingCertAssign.readCertPEM(signingCert.toString())
@@ -381,7 +381,7 @@ export class SignedDataVerifier {
         throw new VerificationException(VerificationStatus.FAILURE)
       }
 
-      if (!verify(shortAlg, Buffer.from(responseData, 'hex'), signingCert.publicKey, Buffer.from(parsedResponse.sighex, 'hex'))) {
+      if (!CryptoCompat.verify(shortAlg, responseData, X509CertificateCompat.publicKey(signingCert), parsedResponse.sighex)) {
         throw new VerificationException(VerificationStatus.FAILURE)
       }
       

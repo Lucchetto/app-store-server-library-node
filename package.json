@@ -11,6 +11,8 @@
   },
   "types": "dist/index.d.ts",
   "dependencies": {
+    "@peculiar/webcrypto": "^1.5.0",
+    "@peculiar/x509": "^1.14.3",
     "@types/jsonwebtoken": "^9.0.5",
     "@types/jsrsasign": "^10.5.12",
     "@types/node": "^24.0.10",
