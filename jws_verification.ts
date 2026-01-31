@@ -327,7 +327,7 @@ export class SignedDataVerifier {
         throw new VerificationException(VerificationStatus.RETRYABLE_VERIFICATION_FAILURE, error instanceof Error ? error : undefined)
       }
 
-      const responseBuffer = await response.buffer()
+      const responseBuffer = Buffer.from(await response.arrayBuffer())
       const parsedResponse = new (KJUR.asn1.ocsp as any).OCSPParser().getOCSPResponse(responseBuffer.toString('hex'))
       // The issuer could also be the signer
       const jsrassignX509Issuer = new X509()
