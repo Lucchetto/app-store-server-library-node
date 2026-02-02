@@ -35,6 +35,7 @@
   },
   "scripts": {
     "build": "tsc -p .",
+    "prepare": "tsc -p .",
     "test": "jest",
     "build-docs": "typedoc index.ts"
   },
